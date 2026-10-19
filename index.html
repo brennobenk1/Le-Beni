@@ -218,6 +218,10 @@ button,input,textarea,select{font:inherit;color:inherit}
 .item .tx code{display:block;font-family:var(--mono);font-size:.64rem;color:var(--faint);margin-top:3px}
 .tag{display:inline-block;font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;font-weight:700;
   color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:1px 6px;margin-right:5px;vertical-align:1px}
+.fila{border:1px solid var(--petal);background:var(--petal-soft);border-radius:14px;padding:11px 13px;
+  font-size:.78rem;color:var(--muted);line-height:1.5;margin-bottom:2px}
+.fila b{display:block;font-family:var(--display);font-variation-settings:var(--soft);font-weight:600;
+  font-size:.88rem;color:var(--fg);margin-bottom:3px}
 .empty{padding:22px 10px;color:var(--muted);font-size:.86rem;line-height:1.7}
 .empty b{display:block;font-family:var(--display);font-variation-settings:var(--soft);font-style:italic;
   font-size:1.08rem;color:var(--fg);margin-bottom:7px;font-weight:500}
@@ -711,6 +715,15 @@ function renderStats(){
   $("s-count").textContent = entries.length ? entries.length + (entries.length===1?" memória":" memórias") : "";
 }
 var openFolders = {};
+function avisoFila(){
+  var f = lerFila();
+  if(!f.length) return "";
+  var n = f.length;
+  return '<div class="fila">' +
+    '<b>' + n + (n===1 ? ' trajeto esperando internet' : ' trajetos esperando internet') + '</b>' +
+    (navigator.onLine ? 'Enviando agora…' : 'Assim que a conexão voltar, eles sobem sozinhos. Pode fechar o site.') +
+    '</div>';
+}
 function renderList(){
   var el = $("list");
   if(!entries.length && folders.length <= 1){
@@ -719,6 +732,7 @@ function renderList(){
         ? 'Marque um lugar onde vocês estiveram, ou grave o trajeto da próxima saída. Cada coisa fica guardada num acontecimento — “Nossa viagem pra praia”, “Aniversário dela”, o que vocês quiserem.'
         : 'Quando alguém marcar o primeiro lugar, ele aparece aqui pra todo mundo que abrir este endereço.') +
       '</div>';
+    el.innerHTML = avisoFila() + el.innerHTML;
     return;
   }
   var groups = {};
@@ -768,7 +782,7 @@ function renderList(){
     }
     html += '</div>';
   });
-  el.innerHTML = html;
+  el.innerHTML = avisoFila() + html;
   Array.prototype.forEach.call(el.querySelectorAll("[data-toggle]"), function(b){
     b.onclick = function(){
       var id = b.getAttribute("data-toggle");
@@ -803,15 +817,17 @@ function initAuth(){
         if(!resp || !resp.access_token){ return; }
         token = resp.access_token;
         podeGravar = true;
-        try { sessionStorage.setItem("lb-logado", "1"); } catch(e){}
+        try { localStorage.setItem("lb-logado", "1"); } catch(e){}
         applyAuth();
         reload().then(function(){
           if(!scrim.hidden && scrim.querySelector("#conta-area")) openConta();
+          processarFila();
+          verRascunho();
         });
       }
     });
     var antes = null;
-    try { antes = sessionStorage.getItem("lb-logado"); } catch(e){}
+    try { antes = localStorage.getItem("lb-logado"); } catch(e){}
     if(antes) tokenClient.requestAccessToken({ prompt: "" });
   } catch(e){}
 }
@@ -822,7 +838,7 @@ function entrar(){
 function sair(){
   if(token && google.accounts.oauth2.revoke) { try { google.accounts.oauth2.revoke(token); } catch(e){} }
   token = null; podeGravar = false;
-  try { sessionStorage.removeItem("lb-logado"); } catch(e){}
+  try { localStorage.removeItem("lb-logado"); } catch(e){}
   applyAuth();
   reload();
   openConta();
@@ -1017,6 +1033,46 @@ function driveDaEntrada(en){
   });
 }
 
+/* ===================== fila de envio (sem internet) ===================== */
+function lerFila(){
+  try { return JSON.parse(localStorage.getItem("lb-fila") || "[]") || []; } catch(e){ return []; }
+}
+function gravarFila(f){
+  try { localStorage.setItem("lb-fila", JSON.stringify(f)); } catch(e){}
+}
+function enfileirar(item){
+  var f = lerFila();
+  f.push(item);
+  gravarFila(f);
+  renderList();
+}
+var enviandoFila = false;
+function processarFila(){
+  if(enviandoFila) return Promise.resolve();
+  var f = lerFila();
+  if(!f.length || !navigator.onLine || !podeGravar) return Promise.resolve();
+  enviandoFila = true;
+  var item = f[0];
+  var escolha = { id: item.novo ? item.novo.id : (item.folderId || "inbox"), novo: item.novo || null };
+  return comLogin(function(){
+    return garantirDrive(escolha).then(function(){
+      return mudarIndex(function(ix){
+        anotarDrive(ix, escolha);
+        item.dados.folderId = escolha.id === "inbox" ? null : escolha.id;
+        if(!ix.entries.some(function(e){ return e.id === item.dados.id; })) ix.entries.push(item.dados);
+      });
+    });
+  }).then(function(){
+    gravarFila(lerFila().filter(function(x){ return x.id !== item.id; }));
+    enviandoFila = false;
+    renderList();
+    return processarFila();
+  }).catch(function(){
+    enviandoFila = false;
+  });
+}
+window.addEventListener("online", function(){ processarFila(); });
+
 /* ===================== escolher ponto ===================== */
 var picking = false, formCtx = { existing:null, draft:null, photos:[] };
 function startPicking(msg){
@@ -1172,7 +1228,7 @@ function openPlaceForm(existing, coords, draft){
 }
 
 /* ===================== gravação de trajeto ===================== */
-var rec = null, recTimer = 0, wakeLock = null, watchId = 0, recLine = null;
+var rec = null, recTimer = 0, wakeLock = null, watchId = 0, recLine = null, tituloPlanejado = "";
 function recNote(s){ $("recnote").textContent = s || ""; }
 
 $("addroute").onclick = function(){
@@ -1191,6 +1247,8 @@ $("addroute").onclick = function(){
 /* explica antes de o navegador perguntar, e espera o primeiro sinal */
 function pedirGPS(){
   var corpo =
+    '<div class="row"><div><label class="lb" for="gps-titulo">Como vamos chamar esse trajeto?</label>' +
+      '<input class="in" id="gps-titulo" type="text" maxlength="90" placeholder="Volta no parque, ida pra praia…"></div></div>' +
     '<div class="note" style="margin-top:0">Pra desenhar o caminho de vocês no mapa, o site precisa acompanhar ' +
     'a localização do aparelho enquanto vocês andam.\n\n' +
     'Ao continuar, o navegador vai perguntar se você permite. Escolha <strong>Permitir</strong> — e, se ele der ' +
@@ -1201,9 +1259,11 @@ function pedirGPS(){
     '<button class="btn ghost" type="button" id="gps-nao">Agora não</button><span class="spacer"></span>' +
     '<button class="btn primary" type="button" id="gps-sim">Permitir e começar</button>');
   $("gps-nao").onclick = closeSheet;
+  $("gps-titulo").focus();
   function msg(t){ var m = $("gps-msg"); if(m){ m.textContent = t || ""; m.hidden = !t; } }
   $("gps-sim").onclick = function(){
     var b = $("gps-sim");
+    tituloPlanejado = ($("gps-titulo").value || "").trim();
     b.disabled = true; b.textContent = "Procurando o GPS…";
     msg("");
     navigator.geolocation.getCurrentPosition(function(pos){
@@ -1223,11 +1283,11 @@ function pedirGPS(){
 }
 
 function startRec(primeiroSinal){
-  rec = { points:[], startedAt:Date.now(), pausedMs:0, pausedAt:0, distanceKm:0, paused:false };
+  rec = { points:[], startedAt:Date.now(), pausedMs:0, pausedAt:0, distanceKm:0, paused:false, ultimoAceito:0, titulo:tituloPlanejado };
   $("rec").hidden = false;
   $("rec").classList.remove("paused");
   $("rec-pause").textContent = "Pausar";
-  $("recwho").textContent = "Gravando o trajeto";
+  $("recwho").textContent = rec.titulo ? rec.titulo : "Gravando o trajeto";
   recNote("Procurando sinal de GPS…");
   recLine = L.polyline([], { color: accentColor(), weight:4, opacity:.95, dashArray:"1 6", lineCap:"round" }).addTo(map);
   if(window.innerWidth < 900) $("side").classList.add("collapsed");
@@ -1246,14 +1306,20 @@ document.addEventListener("visibilitychange", function(){
 function onFix(pos){
   if(!rec || rec.paused) return;
   var c = pos.coords;
-  if(c.accuracy && c.accuracy > 60){ recNote("Sinal fraco (±" + Math.round(c.accuracy) + " m). Aguardando melhorar."); return; }
+  var parado = rec.ultimoAceito ? (Date.now() - rec.ultimoAceito) : 0;
+  var limite = parado > 15000 ? 150 : 75;
+  if(c.accuracy && c.accuracy > limite){
+    recNote("Sinal fraco (±" + Math.round(c.accuracy) + " m). Aguardando melhorar.");
+    return;
+  }
   var last = rec.points[rec.points.length-1];
   if(last){
     var d = haversine(last[0], last[1], c.latitude, c.longitude);
-    if(d < 0.004) return;
+    if(d < 0.0025) return;
     if(d > 2 && (pos.timestamp - last[2]) < 20000) return;
     rec.distanceKm += d;
   }
+  rec.ultimoAceito = Date.now();
   rec.points.push([Number(c.latitude.toFixed(6)), Number(c.longitude.toFixed(6)), pos.timestamp]);
   recLine.addLatLng([c.latitude, c.longitude]);
   if(rec.points.length === 1 || rec.points.length % 12 === 0) map.panTo([c.latitude, c.longitude], { animate:true });
@@ -1281,7 +1347,7 @@ function tickRec(){
 }
 function salvarRascunho(){
   if(!rec) return;
-  try { localStorage.setItem("lb-rascunho", JSON.stringify({ points:rec.points, startedAt:rec.startedAt, distanceKm:rec.distanceKm })); } catch(e){}
+  try { localStorage.setItem("lb-rascunho", JSON.stringify({ points:rec.points, startedAt:rec.startedAt, distanceKm:rec.distanceKm, titulo:rec.titulo||"" })); } catch(e){}
 }
 function limparRascunho(){ try { localStorage.removeItem("lb-rascunho"); } catch(e){} }
 
@@ -1322,7 +1388,7 @@ $("rec-stop").onclick = function(){
   }
   var done = {
     points: rec.points.slice(), startedAt: rec.startedAt, endedAt: Date.now(),
-    durationMs: elapsed(), distanceKm: rec.distanceKm
+    durationMs: elapsed(), distanceKm: rec.distanceKm, titulo: rec.titulo || ""
   };
   endRecording();
   openRouteForm(done);
@@ -1348,16 +1414,18 @@ function openRouteForm(done){
       '<div class="fact"><b>'+fmtClock(done.startedAt)+' – '+fmtClock(done.endedAt)+'</b><span>horário</span></div>' +
     '</div>' +
     '<div class="row"><div><label class="lb" for="f-title">Como vocês vão chamar esse caminho?</label>' +
-      '<input class="in" id="f-title" type="text" maxlength="90" placeholder="Volta no parque, ida pra praia…"></div></div>' +
+      '<input class="in" id="f-title" type="text" maxlength="90" placeholder="Volta no parque, ida pra praia…" value="'+esc(done.titulo||"")+'"></div></div>' +
     '<div class="row"><div><label class="lb" for="f-date">Data</label>' +
       '<input class="in" id="f-date" type="date" value="'+todayISO(new Date(done.startedAt))+'"></div>' +
       '<div><label class="lb" for="f-folder">Faz parte de qual acontecimento</label>'+folderSelectHTML("inbox")+'</div></div>' +
     '<div class="row"><div><label class="lb" for="f-note">Como foi o caminho</label>' +
       '<textarea class="in" id="f-note" maxlength="2000" placeholder="O que vocês viram, conversaram, comeram"></textarea></div></div>' +
-    '<div class="row"><div><label class="lb">Fotos do caminho</label>' +
-      '<div class="drop" id="f-drop">Escolher as fotos</div>' +
-      '<input type="file" id="f-file" accept="image/*" multiple hidden>' +
-      '<div class="thumbs" id="f-thumbs" style="margin-top:10px"></div></div></div>' +
+    (navigator.onLine
+      ? '<div class="row"><div><label class="lb">Fotos do caminho</label>' +
+        '<div class="drop" id="f-drop">Escolher as fotos</div>' +
+        '<input type="file" id="f-file" accept="image/*" multiple hidden>' +
+        '<div class="thumbs" id="f-thumbs" style="margin-top:10px"></div></div></div>'
+      : '<div class="meta">Você está sem internet. O trajeto fica guardado no aparelho e sobe sozinho quando a conexão voltar — as fotos você adiciona depois, abrindo o trajeto.</div>') +
     '<div class="msg" id="f-msg" hidden></div>';
   var actions = '<button class="btn ghost" type="button" id="f-cancel">Descartar</button><span class="spacer"></span>' +
     '<button class="btn primary" type="button" id="f-save">Guardar o trajeto</button>';
@@ -1379,17 +1447,19 @@ function openRouteForm(done){
     });
   }
   var fileEl = $("f-file");
-  $("f-drop").onclick = function(){ fileEl.click(); };
-  fileEl.onchange = function(){
-    var list = Array.prototype.slice.call(fileEl.files||[]); fileEl.value = "";
-    if(!list.length) return;
-    msg("preparando as fotos…");
-    var chain = Promise.resolve();
-    list.slice(0,30).forEach(function(f){
-      chain = chain.then(function(){ return prepPhoto(f).then(function(r){ pending.push(r); thumbs(); }).catch(function(){}); });
-    });
-    chain.then(function(){ msg(""); });
-  };
+  if(fileEl){
+    $("f-drop").onclick = function(){ fileEl.click(); };
+    fileEl.onchange = function(){
+      var list = Array.prototype.slice.call(fileEl.files||[]); fileEl.value = "";
+      if(!list.length) return;
+      msg("preparando as fotos…");
+      var chain = Promise.resolve();
+      list.slice(0,30).forEach(function(f){
+        chain = chain.then(function(){ return prepPhoto(f).then(function(r){ pending.push(r); thumbs(); }).catch(function(){}); });
+      });
+      chain.then(function(){ msg(""); });
+    };
+  }
   $("f-cancel").onclick = function(){
     var b = $("f-cancel");
     if(b.getAttribute("data-armed") !== "1"){
@@ -1412,6 +1482,16 @@ function openRouteForm(done){
       durationMs: done.durationMs, distanceKm: done.distanceKm,
       createdAt: Date.now()
     };
+    if(!navigator.onLine){
+      dados.photos = [];
+      dados.folderId = escolha.id === "inbox" ? null : escolha.id;
+      enfileirar({ id: uid(), folderId: escolha.id, novo: escolha.novo || null, dados: dados });
+      limparRascunho();
+      closeSheet();
+      alertSheet("Guardado aqui no aparelho",
+        "Você está sem internet, então o trajeto ficou esperando. Assim que a conexão voltar ele sobe sozinho, mesmo que você feche o site. Depois é só abrir o trajeto pra acrescentar as fotos.");
+      return;
+    }
     comLogin(function(){
       return garantirDrive(escolha).then(function(pasta){
         var passo = Promise.resolve([]);
@@ -1811,6 +1891,46 @@ window.addEventListener("beforeunload", function(e){
   if(rec){ e.preventDefault(); e.returnValue = ""; }
 });
 
+/* uma gravação que ficou pela metade volta como pergunta */
+var rascunhoVisto = false;
+function verRascunho(){
+  if(rascunhoVisto) return;
+  var r = null;
+  try { r = JSON.parse(localStorage.getItem("lb-rascunho") || "null"); } catch(e){}
+  if(!r || !r.points || r.points.length < 2) return;
+  rascunhoVisto = true;
+  var ini = new Date(r.startedAt);
+  var p = function(n){ return (n<10?"0":"")+n; };
+  var quando = p(ini.getDate()) + "/" + p(ini.getMonth()+1) + "/" + ini.getFullYear() +
+               " às " + p(ini.getHours()) + ":" + p(ini.getMinutes());
+  var fim = r.points[r.points.length-1][2] || Date.now();
+  var corpo = '<div class="note" style="margin-top:0">Quer salvar esse registro de GPS criado em <strong>' +
+    esc(quando) + '</strong>?</div>' +
+    '<div class="facts" style="margin-top:16px">' +
+      '<div class="fact"><b>'+num(r.distanceKm||0,2)+'</b><span>km percorridos</span></div>' +
+      '<div class="fact"><b>'+fmtDur(fim - r.startedAt)+'</b><span>tempo</span></div>' +
+      '<div class="fact"><b>'+(r.points.length)+'</b><span>pontos de GPS</span></div>' +
+    '</div>' +
+    (r.titulo ? '<div class="meta">Você já tinha chamado ele de “'+esc(r.titulo)+'”.</div>' : '');
+  sheet("Um trajeto ficou guardado", corpo,
+    '<button class="btn ghost" type="button" id="rs-nao">Descartar</button><span class="spacer"></span>' +
+    '<button class="btn primary" type="button" id="rs-sim">Sim, salvar</button>');
+  $("rs-nao").onclick = function(){
+    var b = $("rs-nao");
+    if(b.getAttribute("data-armed") !== "1"){
+      b.setAttribute("data-armed","1"); b.textContent = "Descartar mesmo?";
+      setTimeout(function(){ if(b.isConnected){ b.setAttribute("data-armed",""); b.textContent = "Descartar"; } }, 4000);
+      return;
+    }
+    limparRascunho(); closeSheet();
+  };
+  $("rs-sim").onclick = function(){
+    closeSheet();
+    openRouteForm({ points:r.points, startedAt:r.startedAt, endedAt:fim,
+                    durationMs: fim - r.startedAt, distanceKm: r.distanceKm || 0, titulo: r.titulo || "" });
+  };
+}
+
 /* ===================== início ===================== */
 (function espera(n){
   if(window.google && google.accounts && google.accounts.oauth2){ initAuth(); return; }
@@ -1829,13 +1949,8 @@ reload().then(function(){
     if(pts.length === 1) map.setView(pts[0], 14);
     else if(pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.2));
   }
-  var r = null;
-  try { r = JSON.parse(localStorage.getItem("lb-rascunho") || "null"); } catch(e){}
-  if(r && r.points && r.points.length > 1 && podeGravar){
-    var fim = r.points[r.points.length-1][2] || Date.now();
-    openRouteForm({ points:r.points, startedAt:r.startedAt, endedAt:fim,
-                    durationMs: fim - r.startedAt, distanceKm: r.distanceKm||0 });
-  }
+  verRascunho();
+  processarFila();
 });
 })();
 </script>
