@@ -771,7 +771,7 @@ function initAuth(){
 }
 function entrar(){
   if(!tokenClient){ alertSheet("Login não configurado", "Falta preencher o CLIENT_ID no começo do arquivo."); return; }
-  tokenClient.requestAccessToken({ prompt: "consent" });
+  tokenClient.requestAccessToken({ prompt: "select_account consent" });
 }
 function sair(){
   if(token && google.accounts.oauth2.revoke) { try { google.accounts.oauth2.revoke(token); } catch(e){} }
