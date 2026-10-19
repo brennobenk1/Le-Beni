@@ -261,6 +261,11 @@ textarea.in{resize:vertical;min-height:74px;line-height:1.55}
 .thumbs .t button{position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:999px;border:0;
   background:rgba(14,24,17,.72);cursor:pointer;display:grid;place-items:center}
 .thumbs .t button svg{width:11px;height:11px;stroke:#fff;stroke-width:2.6;fill:none}
+.thumbs .t .capa{position:absolute;top:4px;left:4px;width:22px;height:22px;border-radius:999px;border:0;
+  background:rgba(10,20,14,.74);cursor:pointer;display:grid;place-items:center}
+.thumbs .t .capa svg{width:12px;height:12px;fill:#fff;stroke:none}
+.thumbs .t .capa:hover{background:var(--petal)}
+.thumbs .t .capa.atual{background:var(--petal);cursor:default}
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:10px;margin:2px 0 16px}
 .fact{background:var(--accent-soft);border-radius:14px;padding:10px 12px}
 .fact b{display:block;font-family:var(--display);font-variation-settings:var(--soft);font-weight:600;
@@ -417,6 +422,7 @@ function haversine(a1,o1,a2,o2){
 }
 function heartSVG(){ return '<svg viewBox="0 0 24 24"><path d="M12 21.2S3.8 15.9 3.8 10.1A4.8 4.8 0 0 1 12 7.2a4.8 4.8 0 0 1 8.2 2.9c0 5.8-8.2 11.1-8.2 11.1z"></path></svg>'; }
 function routeSVG(){ return '<svg viewBox="0 0 24 24"><path d="M5 19c3 0 3-7 7-7s4-7 7-7" fill="none" stroke="currentColor" stroke-width="2.2"></path></svg>'; }
+var CORACAO = '<svg viewBox="0 0 24 24"><path d="M12 21.2S3.8 15.9 3.8 10.1A4.8 4.8 0 0 1 12 7.2a4.8 4.8 0 0 1 8.2 2.9c0 5.8-8.2 11.1-8.2 11.1z"></path></svg>';
 function tiltOf(id){ var h=0; for(var i=0;i<id.length;i++) h=(h*31+id.charCodeAt(i))|0; return (Math.abs(h)%9)-4; }
 
 /* ===================== Google Drive ===================== */
@@ -483,9 +489,9 @@ function gravarIndex(dados){
 }
 
 /* --- criar arquivo (multipart: metadados + conteúdo) --- */
-function criarArquivo(blob, mime, nome){
+function criarArquivo(blob, mime, nome, paiId){
   var limite = "lebeni" + Math.random().toString(36).slice(2);
-  var meta = JSON.stringify({ name: nome, parents: [CONFIG.FOLDER_ID] });
+  var meta = JSON.stringify({ name: nome, parents: [paiId || CONFIG.FOLDER_ID] });
   var cabeca = "--" + limite + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + meta +
                "\r\n--" + limite + "\r\nContent-Type: " + mime + "\r\n\r\n";
   var cauda = "\r\n--" + limite + "--\r\n";
@@ -499,6 +505,30 @@ function tornarPublico(fileId){
     method:"POST", headers:{ "Content-Type":"application/json" },
     body: JSON.stringify({ role:"reader", type:"anyone" })
   }).then(function(){ return fileId; }).catch(function(){ return fileId; });
+}
+/* uma subpasta por acontecimento, dentro da pasta mestre */
+function criarPasta(nome){
+  return gJSON(DRIVE + "/files?fields=id", {
+    method:"POST", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ name: nomeLimpo(nome), mimeType:"application/vnd.google-apps.folder", parents:[CONFIG.FOLDER_ID] })
+  }).then(function(j){ return tornarPublico(j.id); });
+}
+function renomearPasta(driveId, nome){
+  if(!driveId) return Promise.resolve();
+  return g(DRIVE + "/files/" + driveId, {
+    method:"PATCH", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ name: nomeLimpo(nome) })
+  }).catch(function(){});
+}
+function moverArquivo(fileId, novoPai, velhoPai){
+  if(!fileId || !novoPai || novoPai === velhoPai) return Promise.resolve();
+  var u = DRIVE + "/files/" + fileId + "?addParents=" + encodeURIComponent(novoPai);
+  if(velhoPai) u += "&removeParents=" + encodeURIComponent(velhoPai);
+  return g(u, { method:"PATCH", headers:{ "Content-Type":"application/json" }, body:"{}" }).catch(function(){});
+}
+function nomeLimpo(s){
+  var t = String(s||"").replace(/[\\\/:*?"<>|\r\n]/g, "-").trim();
+  return t.slice(0, 60) || "sem nome";
 }
 function apagarArquivo(fileId){
   if(!fileId) return Promise.resolve();
@@ -522,7 +552,9 @@ function mudarIndex(mudanca){
     aplicar(atual);
   });
 }
+var inboxDriveId = null;
 function aplicar(d){
+  inboxDriveId = d.inboxDriveId || null;
   folders = (d.folders || []).slice();
   folders.push({ id:"inbox", name:"Momentos soltos", createdAt:0 });
   entries = (d.entries || []).map(function(en){
@@ -836,22 +868,22 @@ function prepPhoto(file){
   });
 }
 /* sobe a foto e a miniatura, deixa as duas públicas e devolve os ids */
-function subirFoto(p){
-  var base = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-  return criarArquivo(p.full, "image/jpeg", base + ".jpg")
+function subirFoto(p, paiId, nomeBase){
+  var nome = nomeLimpo(nomeBase);
+  return criarArquivo(p.full, "image/jpeg", nome + ".jpg", paiId)
     .then(function(id){ return tornarPublico(id); })
     .then(function(fileId){
-      return criarArquivo(p.thumb, "image/jpeg", base + "-m.jpg")
+      return criarArquivo(p.thumb, "image/jpeg", nome + " (mini).jpg", paiId)
         .then(function(id2){ return tornarPublico(id2); })
         .then(function(thumbId){ return { id:uid(), fileId:fileId, thumbId:thumbId }; });
     });
 }
-function subirFotos(lista, aoAndar){
+function subirFotos(lista, paiId, nomeBase, inicio, aoAndar){
   var out = [], chain = Promise.resolve();
   lista.forEach(function(p, i){
     chain = chain.then(function(){
       if(aoAndar) aoAndar(i+1, lista.length);
-      return subirFoto(p).then(function(r){ out.push(r); });
+      return subirFoto(p, paiId, nomeBase + " " + ((inicio||0)+i+1)).then(function(r){ out.push(r); });
     });
   });
   return chain.then(function(){ return out; });
@@ -927,6 +959,48 @@ function escolhaDePasta(){
   var name = (nf.value || "").trim() || "Nosso acontecimento";
   var f = { id: uid(), name: name, createdAt: Date.now() };
   return { id: f.id, novo: f };
+}
+
+/* devolve a subpasta do Drive onde as fotos deste acontecimento moram */
+function garantirDrive(escolha){
+  if(escolha.novo){
+    return criarPasta(escolha.novo.name).then(function(d){ escolha.driveId = d; return d; });
+  }
+  if(escolha.id === "inbox"){
+    if(inboxDriveId) return Promise.resolve(inboxDriveId);
+    return criarPasta("Momentos soltos").then(function(d){ escolha.driveId = d; inboxDriveId = d; return d; });
+  }
+  var f = folderOf(escolha.id);
+  if(f && f.driveId) return Promise.resolve(f.driveId);
+  return criarPasta(f ? f.name : "Acontecimento").then(function(d){ escolha.driveId = d; return d; });
+}
+/* grava no index o que garantirDrive acabou de criar */
+function anotarDrive(ix, escolha){
+  if(escolha.novo){
+    escolha.novo.driveId = escolha.driveId || null;
+    if(!ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
+  } else if(escolha.driveId){
+    if(escolha.id === "inbox") ix.inboxDriveId = escolha.driveId;
+    else ix.folders.forEach(function(x){ if(x.id === escolha.id) x.driveId = escolha.driveId; });
+  }
+}
+/* a subpasta de um registro que já existe */
+function driveDaEntrada(en){
+  var fid = en.folderId || "inbox";
+  if(fid === "inbox"){
+    if(inboxDriveId) return Promise.resolve(inboxDriveId);
+    return criarPasta("Momentos soltos").then(function(d){
+      inboxDriveId = d;
+      return mudarIndex(function(ix){ ix.inboxDriveId = d; }).then(function(){ return d; });
+    });
+  }
+  var f = folderOf(fid);
+  if(f && f.driveId) return Promise.resolve(f.driveId);
+  return criarPasta(f ? f.name : "Acontecimento").then(function(d){
+    return mudarIndex(function(ix){
+      ix.folders.forEach(function(x){ if(x.id === fid) x.driveId = d; });
+    }).then(function(){ return d; });
+  });
 }
 
 /* ===================== escolher ponto ===================== */
@@ -1035,25 +1109,39 @@ function openPlaceForm(existing, coords, draft){
       lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)),
       createdAt: existing ? existing.createdAt : Date.now()
     };
+    var folderAntigo = existing ? (existing.folderId || "inbox") : null;
     comLogin(function(){
-      var passo = Promise.resolve([]);
-      if(!existing && pending.length){
-        msg("enviando as fotos…");
-        passo = subirFotos(pending, function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
-      }
-      return passo.then(function(fotos){
-        msg("guardando…");
-        return mudarIndex(function(ix){
-          if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
-          var antigo = null;
-          for(var i=0;i<ix.entries.length;i++) if(ix.entries[i].id === dados.id){ antigo = ix.entries[i]; break; }
-          if(antigo){
-            antigo.title = dados.title; antigo.date = dados.date; antigo.note = dados.note;
-            antigo.folderId = dados.folderId; antigo.lat = dados.lat; antigo.lng = dados.lng;
-          } else {
-            dados.photos = fotos;
-            ix.entries.push(dados);
-          }
+      return garantirDrive(escolha).then(function(pasta){
+        var passo = Promise.resolve([]);
+        if(!existing && pending.length){
+          msg("enviando as fotos…");
+          passo = subirFotos(pending, pasta, dados.date + " " + dados.title, 0,
+                             function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
+        }
+        return passo.then(function(fotos){
+          msg("guardando…");
+          return mudarIndex(function(ix){
+            anotarDrive(ix, escolha);
+            var antigo = null;
+            for(var i=0;i<ix.entries.length;i++) if(ix.entries[i].id === dados.id){ antigo = ix.entries[i]; break; }
+            if(antigo){
+              antigo.title = dados.title; antigo.date = dados.date; antigo.note = dados.note;
+              antigo.folderId = dados.folderId; antigo.lat = dados.lat; antigo.lng = dados.lng;
+            } else {
+              dados.photos = fotos;
+              ix.entries.push(dados);
+            }
+          }).then(function(){
+            /* mudou de acontecimento: leva as fotos para a subpasta nova */
+            if(!existing || folderAntigo === (dados.folderId || "inbox")) return null;
+            var velho = folderAntigo === "inbox" ? inboxDriveId : (folderOf(folderAntigo) || {}).driveId;
+            var chain = Promise.resolve();
+            (existing.photos || []).forEach(function(ph){
+              chain = chain.then(function(){ return moverArquivo(ph.fileId, pasta, velho); })
+                           .then(function(){ return moverArquivo(ph.thumbId, pasta, velho); });
+            });
+            return chain;
+          });
         });
       });
     }).then(function(){
@@ -1275,17 +1363,20 @@ function openRouteForm(done){
       createdAt: Date.now()
     };
     comLogin(function(){
-      var passo = Promise.resolve([]);
-      if(pending.length){
-        msg("enviando as fotos…");
-        passo = subirFotos(pending, function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
-      }
-      return passo.then(function(fotos){
-        dados.photos = fotos;
-        msg("guardando…");
-        return mudarIndex(function(ix){
-          if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
-          ix.entries.push(dados);
+      return garantirDrive(escolha).then(function(pasta){
+        var passo = Promise.resolve([]);
+        if(pending.length){
+          msg("enviando as fotos…");
+          passo = subirFotos(pending, pasta, dados.date + " " + dados.title, 0,
+                             function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
+        }
+        return passo.then(function(fotos){
+          dados.photos = fotos;
+          msg("guardando…");
+          return mudarIndex(function(ix){
+            anotarDrive(ix, escolha);
+            ix.entries.push(dados);
+          });
         });
       });
     }).then(function(){
@@ -1341,10 +1432,30 @@ function openDetail(id){
     var atual = entryById(id) || en;
     var fotos = atual.photos || [];
     box.innerHTML = fotos.map(function(p,i){
-      return '<div class="t"><img src="'+fotoURL(p.thumbId)+'" data-i="'+i+'" alt="">' +
+      var capa = "";
+      if(editavel && i === 0) capa = '<span class="capa atual" title="Esta é a capa">' + CORACAO + '</span>';
+      else if(editavel) capa = '<button type="button" class="capa" data-capa="'+i+'" title="Usar como capa" aria-label="Usar como capa">' + CORACAO + '</button>';
+      return '<div class="t"><img src="'+fotoURL(p.thumbId)+'" data-i="'+i+'" alt="">' + capa +
         (editavel ? '<button type="button" data-del="'+i+'" aria-label="Remover foto"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>' : '') +
         '</div>';
     }).join("");
+    Array.prototype.forEach.call(box.querySelectorAll("[data-capa]"), function(b){
+      b.onclick = function(){
+        var alvo = fotos[Number(b.getAttribute("data-capa"))];
+        b.disabled = true;
+        comLogin(function(){
+          return mudarIndex(function(ix){
+            ix.entries.forEach(function(e){
+              if(e.id !== id) return;
+              var arr = (e.photos || []).slice(), j = -1;
+              arr.forEach(function(x,k){ if(x.id === alvo.id) j = k; });
+              if(j > 0){ arr.unshift(arr.splice(j,1)[0]); e.photos = arr; }
+            });
+          });
+        }).then(function(){ paint(); })
+          .catch(function(err){ b.disabled = false; falhou(err, dmsg); });
+      };
+    });
     state(fotos.length ? "" : "Sem fotos ainda — que tal a primeira?");
     Array.prototype.forEach.call(box.querySelectorAll("img"), function(im){
       im.onclick = function(){
@@ -1384,16 +1495,20 @@ function openDetail(id){
       });
       chain.then(function(){
         if(!prontas.length){ dmsg("Nenhuma imagem pôde ser lida."); return null; }
+        var atual = entryById(id) || en;
+        var quantas = (atual.photos || []).length;
         return comLogin(function(){
-          return subirFotos(prontas, function(i,n){ dmsg("enviando foto " + i + " de " + n + "…"); })
-            .then(function(fotos){
-              dmsg("guardando…");
-              return mudarIndex(function(ix){
-                ix.entries.forEach(function(e){
-                  if(e.id === id) e.photos = (e.photos||[]).concat(fotos);
-                });
+          return driveDaEntrada(atual).then(function(pasta){
+            return subirFotos(prontas, pasta, atual.date + " " + atual.title, quantas,
+                              function(i,n){ dmsg("enviando foto " + i + " de " + n + "…"); });
+          }).then(function(fotos){
+            dmsg("guardando…");
+            return mudarIndex(function(ix){
+              ix.entries.forEach(function(e){
+                if(e.id === id) e.photos = (e.photos||[]).concat(fotos);
               });
             });
+          });
         });
       }).then(function(){ dmsg(""); paint(); })
         .catch(function(err){ falhou(err, dmsg); });
@@ -1456,11 +1571,23 @@ function openRouteEdit(en){
       note: $("f-note").value.trim(),
       folderId: escolha.id === "inbox" ? null : escolha.id
     };
+    var folderAntigo = en.folderId || "inbox";
     comLogin(function(){
-      return mudarIndex(function(ix){
-        if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
-        ix.entries.forEach(function(e){
-          if(e.id === en.id){ e.title = novo.title; e.date = novo.date; e.note = novo.note; e.folderId = novo.folderId; }
+      return garantirDrive(escolha).then(function(pasta){
+        return mudarIndex(function(ix){
+          anotarDrive(ix, escolha);
+          ix.entries.forEach(function(e){
+            if(e.id === en.id){ e.title = novo.title; e.date = novo.date; e.note = novo.note; e.folderId = novo.folderId; }
+          });
+        }).then(function(){
+          if(folderAntigo === (novo.folderId || "inbox")) return null;
+          var velho = folderAntigo === "inbox" ? inboxDriveId : (folderOf(folderAntigo) || {}).driveId;
+          var chain = Promise.resolve();
+          (en.photos || []).forEach(function(ph){
+            chain = chain.then(function(){ return moverArquivo(ph.fileId, pasta, velho); })
+                         .then(function(){ return moverArquivo(ph.thumbId, pasta, velho); });
+          });
+          return chain;
         });
       });
     }).then(function(){ closeSheet(); renderList(); renderMap(); })
@@ -1562,9 +1689,12 @@ function openMenu(){
       var fid = inp.getAttribute("data-fid");
       var novo = inp.value.trim();
       if(!novo) return;
+      var atual = folderOf(fid);
       comLogin(function(){
-        return mudarIndex(function(ix){
-          ix.folders.forEach(function(f){ if(f.id === fid) f.name = novo; });
+        return renomearPasta(atual && atual.driveId, novo).then(function(){
+          return mudarIndex(function(ix){
+            ix.folders.forEach(function(f){ if(f.id === fid) f.name = novo; });
+          });
         });
       }).then(function(){ renderList(); }).catch(function(err){ falhou(err, mmsg); });
     };
@@ -1590,8 +1720,10 @@ function openMenu(){
     var name = $("m-new").value.trim();
     if(!name){ mmsg("Dá um nome a esse acontecimento."); return; }
     comLogin(function(){
-      return mudarIndex(function(ix){
-        ix.folders.push({ id: uid(), name: name, createdAt: Date.now() });
+      return criarPasta(name).then(function(driveId){
+        return mudarIndex(function(ix){
+          ix.folders.push({ id: uid(), name: name, createdAt: Date.now(), driveId: driveId });
+        });
       });
     }).then(function(){ openMenu(); }).catch(function(err){ falhou(err, mmsg); });
   };
