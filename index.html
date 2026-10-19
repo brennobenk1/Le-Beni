@@ -95,7 +95,11 @@ button,input,textarea,select{font:inherit;color:inherit}
 .leaflet-bar{border-radius:10px !important;overflow:hidden;box-shadow:var(--shadow) !important;border:0 !important}
 
 /* ---------- polaroides no mapa ---------- */
-.mk{display:flex;flex-direction:column;align-items:center;cursor:pointer}
+.mk{display:flex;flex-direction:column;align-items:center;cursor:pointer;
+  transform-origin:bottom center;transform:scale(var(--mk-s,1));transition:transform .18s ease}
+.mk.on{transform:scale(1)}
+#map.semlegenda .mk .cap{display:none}
+@media (prefers-reduced-motion:reduce){ .mk{transition:none} }
 .mk .pol{background:var(--paper);padding:5px 5px 7px;border-radius:4px;box-shadow:var(--shadow);
   transform:rotate(var(--tilt,-2deg));transition:transform .22s cubic-bezier(.2,.8,.3,1),box-shadow .22s;
   border:1px solid rgba(0,0,0,.05)}
@@ -601,9 +605,18 @@ function setTiles(){
 }
 function accentColor(){ return getComputedStyle(document.documentElement).getPropertyValue("--route").trim() || "#3F7A58"; }
 
+function ajustarMarcadores(){
+  if(!map) return;
+  var z = map.getZoom(), e = $("map");
+  var s = z <= 7 ? 0.4 : (z <= 10 ? 0.55 : (z <= 12 ? 0.72 : (z <= 14 ? 0.88 : 1)));
+  e.style.setProperty("--mk-s", s);
+  e.classList.toggle("semlegenda", s < 0.75);
+}
 function initMap(){
   map = L.map("map", { zoomControl:true, attributionControl:true }).setView([-25.4284,-49.2733], 12);
   setTiles();
+  map.on("zoomend", ajustarMarcadores);
+  ajustarMarcadores();
   map.on("click", function(e){
     if(!picking) return;
     var ll = e.latlng;
@@ -644,6 +657,7 @@ function renderMap(){
       markers[en.id] = mk;
     }
   });
+  ajustarMarcadores();
 }
 function focusEntry(en){
   if(en.type === "route" && en.points && en.points.length){
@@ -1171,9 +1185,44 @@ $("addroute").onclick = function(){
     alertSheet("Precisa de HTTPS", "O navegador só libera o GPS em páginas servidas por HTTPS. Abra o site pelo endereço https://, não pelo arquivo salvo no computador.");
     return;
   }
-  startRec();
+  pedirGPS();
 };
-function startRec(){
+
+/* explica antes de o navegador perguntar, e espera o primeiro sinal */
+function pedirGPS(){
+  var corpo =
+    '<div class="note" style="margin-top:0">Pra desenhar o caminho de vocês no mapa, o site precisa acompanhar ' +
+    'a localização do aparelho enquanto vocês andam.\n\n' +
+    'Ao continuar, o navegador vai perguntar se você permite. Escolha <strong>Permitir</strong> — e, se ele der ' +
+    'a opção, prefira <strong>Enquanto usa o app</strong>.\n\n' +
+    'O caminho fica guardado só no seu aparelho enquanto a gravação corre. Nada sai daqui até você salvar o trajeto.</div>' +
+    '<div class="msg" id="gps-msg" hidden></div>';
+  sheet("Acesso à localização", corpo,
+    '<button class="btn ghost" type="button" id="gps-nao">Agora não</button><span class="spacer"></span>' +
+    '<button class="btn primary" type="button" id="gps-sim">Permitir e começar</button>');
+  $("gps-nao").onclick = closeSheet;
+  function msg(t){ var m = $("gps-msg"); if(m){ m.textContent = t || ""; m.hidden = !t; } }
+  $("gps-sim").onclick = function(){
+    var b = $("gps-sim");
+    b.disabled = true; b.textContent = "Procurando o GPS…";
+    msg("");
+    navigator.geolocation.getCurrentPosition(function(pos){
+      closeSheet();
+      startRec(pos);
+    }, function(err){
+      b.disabled = false; b.textContent = "Permitir e começar";
+      if(err && err.code === 1){
+        msg("Você negou o acesso. Pra liberar: toque no cadeado ao lado do endereço, procure Localização e mude para Permitir. Depois tente de novo.");
+      } else if(err && err.code === 3){
+        msg("O GPS demorou demais pra responder. Se estiver em lugar fechado, chegue perto de uma janela e tente de novo.");
+      } else {
+        msg("Não deu pra obter a localização agora. Confira se o GPS do aparelho está ligado.");
+      }
+    }, { enableHighAccuracy:true, timeout:20000, maximumAge:0 });
+  };
+}
+
+function startRec(primeiroSinal){
   rec = { points:[], startedAt:Date.now(), pausedMs:0, pausedAt:0, distanceKm:0, paused:false };
   $("rec").hidden = false;
   $("rec").classList.remove("paused");
@@ -1182,6 +1231,7 @@ function startRec(){
   recNote("Procurando sinal de GPS…");
   recLine = L.polyline([], { color: accentColor(), weight:4, opacity:.95, dashArray:"1 6", lineCap:"round" }).addTo(map);
   if(window.innerWidth < 900) $("side").classList.add("collapsed");
+  if(primeiroSinal){ map.setView([primeiroSinal.coords.latitude, primeiroSinal.coords.longitude], Math.max(map.getZoom(), 16)); onFix(primeiroSinal); }
   watchId = navigator.geolocation.watchPosition(onFix, onFixError, { enableHighAccuracy:true, maximumAge:2000, timeout:20000 });
   recTimer = setInterval(tickRec, 1000);
   requestWake();
