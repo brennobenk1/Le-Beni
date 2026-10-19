@@ -378,16 +378,18 @@ textarea.in{resize:vertical;min-height:74px;line-height:1.55}
 "use strict";
 
 /* ===================== configuração =====================
-   Preencha estes dois valores depois de montar o servidor.
-   Estão aqui à vista de propósito: nenhum dos dois é segredo. */
+   Três valores, todos vindos do console do Google. Nenhum é segredo:
+   podem ficar à vista aqui. O LEIAME explica de onde cada um sai.      */
 var CONFIG = {
-  API: "",                // ex.: "https://le-beni.seu-nome.workers.dev"
-  GOOGLE_CLIENT_ID: ""    // ex.: "123456.apps.googleusercontent.com"
+  CLIENT_ID: "",   // ex.: "123456-abc.apps.googleusercontent.com"
+  API_KEY:   "",   // ex.: "AIzaSy..."
+  FOLDER_ID: ""    // sai do próprio site, no primeiro acesso de vocês
 };
 
 /* ===================== utilidades ===================== */
 function $(id){ return document.getElementById(id); }
 function esc(s){ var d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 var MONTHS=["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"];
 function fmtDate(iso){
   if(!iso) return "sem data";
@@ -417,38 +419,134 @@ function heartSVG(){ return '<svg viewBox="0 0 24 24"><path d="M12 21.2S3.8 15.9
 function routeSVG(){ return '<svg viewBox="0 0 24 24"><path d="M5 19c3 0 3-7 7-7s4-7 7-7" fill="none" stroke="currentColor" stroke-width="2.2"></path></svg>'; }
 function tiltOf(id){ var h=0; for(var i=0;i<id.length;i++) h=(h*31+id.charCodeAt(i))|0; return (Math.abs(h)%9)-4; }
 
-/* ===================== conversa com o servidor ===================== */
-var auth = { token:null, email:null, podeGravar:false };
+/* ===================== Google Drive ===================== */
+var DRIVE  = "https://www.googleapis.com/drive/v3";
+var UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
+var token = null, tokenClient = null, indexId = null;
+var podeGravar = false;
 
-function photoURL(driveId){ return CONFIG.API + "/p/" + driveId; }
-
-function api(caminho, opcoes){
+/* Toda chamada: com login usa o token; sem login usa a chave pública,
+   que só enxerga arquivos marcados como públicos. */
+function g(url, opcoes){
   opcoes = opcoes || {};
-  var h = opcoes.headers || {};
-  if(auth.token) h.Authorization = "Bearer " + auth.token;
+  var h = Object.assign({}, opcoes.headers || {});
+  var alvo = url;
+  if(token){ h.Authorization = "Bearer " + token; }
+  else { alvo += (alvo.indexOf("?") < 0 ? "?" : "&") + "key=" + encodeURIComponent(CONFIG.API_KEY); }
   var cfg = { method: opcoes.method || "GET", headers: h };
   if(opcoes.body !== undefined) cfg.body = opcoes.body;
-  return fetch(CONFIG.API + caminho, cfg).then(function(r){
-    return r.text().then(function(txt){
-      var j = {};
-      try { j = txt ? JSON.parse(txt) : {}; } catch(e){ j = {}; }
-      if(!r.ok){
-        var err = new Error(j.erro || ("erro " + r.status));
-        err.status = r.status;
-        throw err;
-      }
-      return j;
+  return fetch(alvo, cfg).then(function(r){
+    if(r.status === 401 || r.status === 403){
+      var e = new Error("sem permissão"); e.status = r.status; throw e;
+    }
+    if(!r.ok){
+      var e2 = new Error("o Drive respondeu " + r.status); e2.status = r.status; throw e2;
+    }
+    return r;
+  });
+}
+function gJSON(url, opcoes){ return g(url, opcoes).then(function(r){ return r.json(); }); }
+
+function fotoURL(fileId){
+  return DRIVE + "/files/" + fileId + "?alt=media&key=" + encodeURIComponent(CONFIG.API_KEY);
+}
+
+/* --- achar (ou criar) o index.json dentro da pasta --- */
+function acharIndex(){
+  if(indexId) return Promise.resolve(indexId);
+  var q = "'" + CONFIG.FOLDER_ID + "' in parents and name = 'index.json' and trashed = false";
+  return gJSON(DRIVE + "/files?q=" + encodeURIComponent(q) + "&fields=files(id)&pageSize=1").then(function(j){
+    if(j.files && j.files.length){ indexId = j.files[0].id; return indexId; }
+    return null;
+  });
+}
+function lerIndex(){
+  return acharIndex().then(function(id){
+    if(!id) return { folders:[], entries:[] };
+    return g(DRIVE + "/files/" + id + "?alt=media").then(function(r){ return r.json(); })
+      .catch(function(){ return { folders:[], entries:[] }; });
+  });
+}
+function gravarIndex(dados){
+  var corpo = new Blob([JSON.stringify(dados)], { type:"application/json" });
+  return acharIndex().then(function(id){
+    if(id){
+      return g(UPLOAD + "/" + id + "?uploadType=media", {
+        method:"PATCH", headers:{ "Content-Type":"application/json" }, body: corpo
+      }).then(function(){ return id; });
+    }
+    return criarArquivo(corpo, "application/json", "index.json").then(function(novo){
+      indexId = novo;
+      return tornarPublico(novo).then(function(){ return novo; });
     });
   });
 }
-function apiJSON(caminho, metodo, corpo){
-  return api(caminho, { method:metodo, headers:{ "Content-Type":"application/json" }, body:JSON.stringify(corpo||{}) });
+
+/* --- criar arquivo (multipart: metadados + conteúdo) --- */
+function criarArquivo(blob, mime, nome){
+  var limite = "lebeni" + Math.random().toString(36).slice(2);
+  var meta = JSON.stringify({ name: nome, parents: [CONFIG.FOLDER_ID] });
+  var cabeca = "--" + limite + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + meta +
+               "\r\n--" + limite + "\r\nContent-Type: " + mime + "\r\n\r\n";
+  var cauda = "\r\n--" + limite + "--\r\n";
+  var corpo = new Blob([cabeca, blob, cauda], { type: "multipart/related; boundary=" + limite });
+  return gJSON(UPLOAD + "?uploadType=multipart&fields=id", {
+    method:"POST", headers:{ "Content-Type":"multipart/related; boundary=" + limite }, body: corpo
+  }).then(function(j){ return j.id; });
+}
+function tornarPublico(fileId){
+  return g(DRIVE + "/files/" + fileId + "/permissions", {
+    method:"POST", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ role:"reader", type:"anyone" })
+  }).then(function(){ return fileId; }).catch(function(){ return fileId; });
+}
+function apagarArquivo(fileId){
+  if(!fileId) return Promise.resolve();
+  return g(DRIVE + "/files/" + fileId, { method:"DELETE" }).catch(function(){});
 }
 
 /* ===================== estado ===================== */
 var folders = [], entries = [], selected = null;
 function folderOf(id){ for(var i=0;i<folders.length;i++) if(folders[i].id===id) return folders[i]; return null; }
 function entryById(id){ for(var i=0;i<entries.length;i++) if(entries[i].id===id) return entries[i]; return null; }
+
+/* Toda gravação relê o index antes de escrever, junta a mudança e grava.
+   Assim, se vocês dois salvarem quase ao mesmo tempo, nada se perde. */
+function mudarIndex(mudanca){
+  return lerIndex().then(function(atual){
+    atual.folders = atual.folders || [];
+    atual.entries = atual.entries || [];
+    mudanca(atual);
+    return gravarIndex(atual).then(function(){ return atual; });
+  }).then(function(atual){
+    aplicar(atual);
+  });
+}
+function aplicar(d){
+  folders = (d.folders || []).slice();
+  folders.push({ id:"inbox", name:"Momentos soltos", createdAt:0 });
+  entries = (d.entries || []).map(function(en){
+    en.folderId = folderOf(en.folderId) ? en.folderId : "inbox";
+    en.photos = en.photos || [];
+    en.photoCount = en.photos.length;
+    en.cover = en.photos.length ? fotoURL(en.photos[0].thumbId) : "";
+    return en;
+  });
+  if(selected && !entryById(selected)) selected = null;
+  renderStats(); renderList(); renderMap();
+}
+function reload(){
+  if(!CONFIG.API_KEY || !CONFIG.FOLDER_ID){ semConfig(); return Promise.resolve(); }
+  return lerIndex().then(aplicar).catch(function(){
+    $("list").innerHTML = '<div class="empty"><b>Não deu para ler o Drive.</b>' +
+      'Confira se a pasta está compartilhada como “qualquer pessoa com o link” e se os valores do CONFIG estão certos.</div>';
+  });
+}
+function semConfig(){
+  $("list").innerHTML = '<div class="empty"><b>Falta ligar o site ao Drive.</b>' +
+    'Abra o LEIAME: são três valores pra colar no começo deste arquivo, e todos saem do console do Google.</div>';
+  $("fabs").hidden = true;
+}
 
 /* ===================== mapa ===================== */
 var map, markers = {}, lines = {}, endpoints = {};
@@ -554,32 +652,6 @@ document.addEventListener("pointerdown", function(e){
   if(!e.target.closest("#searchbox")) resEl.hidden = true;
 });
 
-/* ===================== carregar da nuvem ===================== */
-function reload(){
-  if(!CONFIG.API){ semConfig(); return Promise.resolve(); }
-  return api("/api/data").then(function(d){
-    folders = (d.folders || []).slice();
-    folders.push({ id:"inbox", name:"Momentos soltos", createdAt:0 });
-    entries = (d.entries || []).map(function(en){
-      en.folderId = en.folderId || "inbox";
-      en.photos = en.photos || [];
-      en.photoCount = en.photos.length;
-      en.cover = en.photos.length ? photoURL(en.photos[0].thumbId) : "";
-      return en;
-    });
-    if(selected && !entryById(selected)) selected = null;
-    renderStats(); renderList(); renderMap();
-  }).catch(function(){
-    $("list").innerHTML = '<div class="empty"><b>Não deu para falar com o servidor.</b>' +
-      'Verifique a conexão e recarregue a página. Se você acabou de montar o servidor, confira o endereço em CONFIG.API, lá no começo do arquivo.</div>';
-  });
-}
-function semConfig(){
-  $("list").innerHTML = '<div class="empty"><b>Falta ligar o site à nuvem.</b>' +
-    'Abra este arquivo num editor de texto, procure por <strong>CONFIG</strong> nas primeiras linhas do script e preencha o endereço do servidor e o ID do Google. O passo a passo está no LEIAME.</div>';
-  $("fabs").hidden = true;
-}
-
 /* ===================== estatísticas e lista ===================== */
 function renderStats(){
   var places = 0, km = 0, photos = 0;
@@ -592,13 +664,12 @@ function renderStats(){
   $("s-km").textContent = km < 10 ? num(km,1) : Math.round(km);
   $("s-count").textContent = entries.length ? entries.length + (entries.length===1?" memória":" memórias") : "";
 }
-
 var openFolders = {};
 function renderList(){
   var el = $("list");
   if(!entries.length && folders.length <= 1){
     el.innerHTML = '<div class="empty"><b>O mapa de vocês está esperando a primeira memória.</b>' +
-      (auth.podeGravar
+      (podeGravar
         ? 'Marque um lugar onde vocês estiveram, ou grave o trajeto da próxima saída. Cada coisa fica guardada num acontecimento — “Nossa viagem pra praia”, “Aniversário dela”, o que vocês quiserem.'
         : 'Quando alguém marcar o primeiro lugar, ele aparece aqui pra todo mundo que abrir este endereço.') +
       '</div>';
@@ -669,49 +740,58 @@ function renderList(){
 }
 function select(id){ selected = id; renderMap(); renderList(); }
 
-/* ===================== login ===================== */
+/* ===================== entrar na conta do site ===================== */
 function applyAuth(){
-  $("fabs").hidden = !auth.podeGravar || !CONFIG.API;
+  $("fabs").hidden = !podeGravar || !CONFIG.FOLDER_ID;
   var b = $("authbtn");
-  if(b) b.classList.toggle("logged", !!auth.podeGravar);
+  if(b) b.classList.toggle("logged", !!podeGravar);
   renderList();
 }
-function onCredential(res){
-  if(!res || !res.credential) return;
-  auth.token = res.credential;
-  api("/api/me").then(function(j){
-    auth.email = j.email || null;
-    auth.podeGravar = !!j.podeGravar;
-    if(!auth.podeGravar) auth.token = null;
-    applyAuth();
-    if(!scrim.hidden && scrim.querySelector("#conta-area")) openConta();
-  }).catch(function(){
-    auth.token = null; auth.email = null; auth.podeGravar = false;
-    applyAuth();
-  });
-}
 function initAuth(){
-  if(!CONFIG.GOOGLE_CLIENT_ID || !window.google || !google.accounts || !google.accounts.id) return;
+  if(!CONFIG.CLIENT_ID || !window.google || !google.accounts || !google.accounts.oauth2) return;
   try {
-    google.accounts.id.initialize({
-      client_id: CONFIG.GOOGLE_CLIENT_ID,
-      callback: onCredential,
-      auto_select: true,
-      cancel_on_tap_outside: true
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CONFIG.CLIENT_ID,
+      scope: "https://www.googleapis.com/auth/drive.file",
+      callback: function(resp){
+        if(!resp || !resp.access_token){ return; }
+        token = resp.access_token;
+        podeGravar = true;
+        try { sessionStorage.setItem("lb-logado", "1"); } catch(e){}
+        applyAuth();
+        reload().then(function(){
+          if(!scrim.hidden && scrim.querySelector("#conta-area")) openConta();
+        });
+      }
     });
-    google.accounts.id.prompt();
+    var antes = null;
+    try { antes = sessionStorage.getItem("lb-logado"); } catch(e){}
+    if(antes) tokenClient.requestAccessToken({ prompt: "" });
   } catch(e){}
 }
-function sairDaConta(){
-  try { google.accounts.id.disableAutoSelect(); } catch(e){}
-  auth = { token:null, email:null, podeGravar:false };
+function entrar(){
+  if(!tokenClient){ alertSheet("Login não configurado", "Falta preencher o CLIENT_ID no começo do arquivo."); return; }
+  tokenClient.requestAccessToken({ prompt: "consent" });
+}
+function sair(){
+  if(token && google.accounts.oauth2.revoke) { try { google.accounts.oauth2.revoke(token); } catch(e){} }
+  token = null; podeGravar = false;
+  try { sessionStorage.removeItem("lb-logado"); } catch(e){}
   applyAuth();
+  reload();
   openConta();
 }
-function pediuLoginDeNovo(){
-  auth = { token:null, email:null, podeGravar:false };
-  applyAuth();
-  openConta();
+function renovar(){
+  return new Promise(function(res, rej){
+    if(!tokenClient) return rej(new Error("sem login"));
+    var antigo = tokenClient.callback;
+    tokenClient.callback = function(resp){
+      tokenClient.callback = antigo;
+      if(resp && resp.access_token){ token = resp.access_token; podeGravar = true; res(); }
+      else rej(new Error("sem login"));
+    };
+    tokenClient.requestAccessToken({ prompt: "" });
+  });
 }
 
 /* ===================== imagens ===================== */
@@ -734,9 +814,9 @@ function toBlob(src, maxDim, quality){
   var w = src.width, h = src.height, k = Math.min(1, maxDim/Math.max(w,h));
   var c = document.createElement("canvas");
   c.width = Math.max(1, Math.round(w*k)); c.height = Math.max(1, Math.round(h*k));
-  var g = c.getContext("2d");
-  g.fillStyle = "#ffffff"; g.fillRect(0,0,c.width,c.height);
-  g.drawImage(src, 0, 0, c.width, c.height);
+  var g2 = c.getContext("2d");
+  g2.fillStyle = "#ffffff"; g2.fillRect(0,0,c.width,c.height);
+  g2.drawImage(src, 0, 0, c.width, c.height);
   return new Promise(function(res){
     if(c.toBlob) c.toBlob(function(b){ res(b); }, "image/jpeg", quality);
     else res(dataURLtoBlob(c.toDataURL("image/jpeg", quality)));
@@ -755,20 +835,26 @@ function prepPhoto(file){
     });
   });
 }
-function enviarFoto(entryId, p, ord){
-  var fd = new FormData();
-  fd.append("entryId", entryId);
-  fd.append("ord", String(ord));
-  fd.append("full", p.full, "f.jpg");
-  fd.append("thumb", p.thumb, "t.jpg");
-  return api("/api/photos", { method:"POST", body:fd });
+/* sobe a foto e a miniatura, deixa as duas públicas e devolve os ids */
+function subirFoto(p){
+  var base = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+  return criarArquivo(p.full, "image/jpeg", base + ".jpg")
+    .then(function(id){ return tornarPublico(id); })
+    .then(function(fileId){
+      return criarArquivo(p.thumb, "image/jpeg", base + "-m.jpg")
+        .then(function(id2){ return tornarPublico(id2); })
+        .then(function(thumbId){ return { id:uid(), fileId:fileId, thumbId:thumbId }; });
+    });
 }
-function enviarFotos(entryId, lista, inicio){
-  var chain = Promise.resolve();
+function subirFotos(lista, aoAndar){
+  var out = [], chain = Promise.resolve();
   lista.forEach(function(p, i){
-    chain = chain.then(function(){ return enviarFoto(entryId, p, (inicio||0)+i); });
+    chain = chain.then(function(){
+      if(aoAndar) aoAndar(i+1, lista.length);
+      return subirFoto(p).then(function(r){ out.push(r); });
+    });
   });
-  return chain;
+  return chain.then(function(){ return out; });
 }
 
 /* ===================== folha ===================== */
@@ -797,10 +883,19 @@ function alertSheet(title, text){
     '<span class="spacer"></span><button class="btn primary" type="button" id="a-ok">Entendi</button>');
   $("a-ok").onclick = closeSheet;
 }
+/* se o login expirou (1 hora), renova e tenta de novo, uma vez */
+function comLogin(acao){
+  return acao().catch(function(err){
+    if(err && (err.status === 401 || err.status === 403)){
+      return renovar().then(acao);
+    }
+    throw err;
+  });
+}
 function falhou(err, msgFn){
-  if(err && err.status === 401){
-    msgFn("Seu login expirou. Entre de novo pelo botão da conta, lá em cima.");
-    pediuLoginDeNovo();
+  if(err && (err.status === 401 || err.status === 403)){
+    msgFn("Seu acesso expirou. Clique no bonequinho lá em cima e entre de novo.");
+    podeGravar = false; token = null; applyAuth();
   } else {
     msgFn((err && err.message) ? err.message : "Não deu para guardar agora. Tente de novo.");
   }
@@ -824,16 +919,14 @@ function wireFolderSelect(){
     if(!nf.hidden) nf.focus();
   };
 }
-function resolveFolder(){
+/* devolve {id, novo} — o acontecimento novo entra no index junto com o registro */
+function escolhaDePasta(){
   var sel = $("f-folder"), nf = $("f-newfolder");
-  if(!sel) return Promise.resolve(null);
-  if(sel.value !== "__new") return Promise.resolve(sel.value === "inbox" ? null : sel.value);
+  if(!sel) return { id:"inbox", novo:null };
+  if(sel.value !== "__new") return { id: sel.value, novo:null };
   var name = (nf.value || "").trim() || "Nosso acontecimento";
-  return apiJSON("/api/folders", "POST", { name:name }).then(function(j){
-    folders.push({ id:j.id, name:name, createdAt:Date.now() });
-    openFolders[j.id] = true;
-    return j.id;
-  });
+  var f = { id: uid(), name: name, createdAt: Date.now() };
+  return { id: f.id, novo: f };
 }
 
 /* ===================== escolher ponto ===================== */
@@ -932,25 +1025,43 @@ function openPlaceForm(existing, coords, draft){
     var t = titleEl.value.trim();
     if(!t){ msg("Dá um nome a esse lugar."); titleEl.focus(); return; }
     var btn = $("f-save"); btn.disabled = true; btn.textContent = "Guardando…";
+    var escolha = escolhaDePasta();
     var dados = {
+      id: existing ? existing.id : uid(),
       type: "place", title: t,
       date: $("f-date").value || todayISO(),
       note: $("f-note").value.trim(),
-      lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6))
+      folderId: escolha.id === "inbox" ? null : escolha.id,
+      lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)),
+      createdAt: existing ? existing.createdAt : Date.now()
     };
-    resolveFolder().then(function(fid){
-      dados.folderId = fid;
-      if(existing) return apiJSON("/api/entries/"+existing.id, "PUT", dados).then(function(){ return existing.id; });
-      return apiJSON("/api/entries", "POST", dados).then(function(j){
-        if(!pending.length) return j.id;
+    comLogin(function(){
+      var passo = Promise.resolve([]);
+      if(!existing && pending.length){
         msg("enviando as fotos…");
-        return enviarFotos(j.id, pending, 0).then(function(){ return j.id; });
+        passo = subirFotos(pending, function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
+      }
+      return passo.then(function(fotos){
+        msg("guardando…");
+        return mudarIndex(function(ix){
+          if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
+          var antigo = null;
+          for(var i=0;i<ix.entries.length;i++) if(ix.entries[i].id === dados.id){ antigo = ix.entries[i]; break; }
+          if(antigo){
+            antigo.title = dados.title; antigo.date = dados.date; antigo.note = dados.note;
+            antigo.folderId = dados.folderId; antigo.lat = dados.lat; antigo.lng = dados.lng;
+          } else {
+            dados.photos = fotos;
+            ix.entries.push(dados);
+          }
+        });
       });
-    }).then(function(id){
-      selected = id;
+    }).then(function(){
+      if(escolha.novo) openFolders[escolha.novo.id] = true;
+      selected = dados.id;
       formCtx = { existing:null, draft:null, photos:[] };
       closeSheet();
-      return reload();
+      renderList(); renderMap();
     }).catch(function(err){
       btn.disabled = false; btn.textContent = existing ? "Guardar" : "Guardar o lugar";
       falhou(err, msg);
@@ -1151,27 +1262,38 @@ function openRouteForm(done){
     limparRascunho(); closeSheet();
   };
   $("f-save").onclick = function(){
-    var t = $("f-title").value.trim() || "Trajeto sem nome";
     var btn = $("f-save"); btn.disabled = true; btn.textContent = "Guardando…";
+    var escolha = escolhaDePasta();
     var dados = {
-      type:"route", title:t,
+      id: uid(), type:"route",
+      title: $("f-title").value.trim() || "Trajeto sem nome",
       date: $("f-date").value || todayISO(new Date(done.startedAt)),
       note: $("f-note").value.trim(),
+      folderId: escolha.id === "inbox" ? null : escolha.id,
       points: done.points, startedAt: done.startedAt, endedAt: done.endedAt,
-      durationMs: done.durationMs, distanceKm: done.distanceKm
+      durationMs: done.durationMs, distanceKm: done.distanceKm,
+      createdAt: Date.now()
     };
-    resolveFolder().then(function(fid){
-      dados.folderId = fid;
-      return apiJSON("/api/entries", "POST", dados);
-    }).then(function(j){
-      if(!pending.length) return j.id;
-      msg("enviando as fotos…");
-      return enviarFotos(j.id, pending, 0).then(function(){ return j.id; });
-    }).then(function(id){
-      selected = id;
+    comLogin(function(){
+      var passo = Promise.resolve([]);
+      if(pending.length){
+        msg("enviando as fotos…");
+        passo = subirFotos(pending, function(i,n){ msg("enviando foto " + i + " de " + n + "…"); });
+      }
+      return passo.then(function(fotos){
+        dados.photos = fotos;
+        msg("guardando…");
+        return mudarIndex(function(ix){
+          if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
+          ix.entries.push(dados);
+        });
+      });
+    }).then(function(){
+      if(escolha.novo) openFolders[escolha.novo.id] = true;
+      selected = dados.id;
       limparRascunho();
       closeSheet();
-      return reload();
+      renderList(); renderMap();
     }).catch(function(err){
       btn.disabled = false; btn.textContent = "Guardar o trajeto";
       falhou(err, msg);
@@ -1183,7 +1305,7 @@ function openRouteForm(done){
 function openDetail(id){
   var en = entryById(id); if(!en) return;
   var f = folderOf(en.folderId) || folderOf("inbox");
-  var editavel = auth.podeGravar;
+  var editavel = podeGravar;
   var facts = "";
   if(en.type === "route"){
     var avg = en.durationMs > 0 ? en.distanceKm/(en.durationMs/3600000) : 0;
@@ -1216,16 +1338,17 @@ function openDetail(id){
   function dmsg(s){ var m = $("d-msg"); if(!m) return; m.textContent = s||""; m.hidden = !s; }
   function paint(){
     var box = $("d-photos"); if(!box) return;
-    var fotos = (entryById(id) || en).photos || [];
+    var atual = entryById(id) || en;
+    var fotos = atual.photos || [];
     box.innerHTML = fotos.map(function(p,i){
-      return '<div class="t"><img src="'+photoURL(p.thumbId)+'" data-i="'+i+'" alt="">' +
+      return '<div class="t"><img src="'+fotoURL(p.thumbId)+'" data-i="'+i+'" alt="">' +
         (editavel ? '<button type="button" data-del="'+i+'" aria-label="Remover foto"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>' : '') +
         '</div>';
     }).join("");
     state(fotos.length ? "" : "Sem fotos ainda — que tal a primeira?");
     Array.prototype.forEach.call(box.querySelectorAll("img"), function(im){
       im.onclick = function(){
-        $("lbimg").src = photoURL(fotos[Number(im.getAttribute("data-i"))].fileId);
+        $("lbimg").src = fotoURL(fotos[Number(im.getAttribute("data-i"))].fileId);
         $("lightbox").hidden = false;
       };
     });
@@ -1233,9 +1356,15 @@ function openDetail(id){
       b.onclick = function(){
         var p = fotos[Number(b.getAttribute("data-del"))];
         b.disabled = true;
-        api("/api/photos/"+p.id, { method:"DELETE" })
-          .then(function(){ return reload(); })
-          .then(function(){ paint(); })
+        comLogin(function(){
+          return mudarIndex(function(ix){
+            ix.entries.forEach(function(e){
+              if(e.id === id) e.photos = (e.photos||[]).filter(function(x){ return x.id !== p.id; });
+            });
+          }).then(function(){
+            return apagarArquivo(p.fileId).then(function(){ return apagarArquivo(p.thumbId); });
+          });
+        }).then(function(){ paint(); })
           .catch(function(err){ b.disabled = false; falhou(err, dmsg); });
       };
     });
@@ -1248,7 +1377,6 @@ function openDetail(id){
       var list = Array.prototype.slice.call($("d-file").files||[]); $("d-file").value = "";
       if(!list.length) return;
       dmsg("preparando as fotos…");
-      var atual = ((entryById(id)||en).photos || []).length;
       var prontas = [];
       var chain = Promise.resolve();
       list.slice(0,30).forEach(function(file){
@@ -1256,11 +1384,18 @@ function openDetail(id){
       });
       chain.then(function(){
         if(!prontas.length){ dmsg("Nenhuma imagem pôde ser lida."); return null; }
-        dmsg("enviando…");
-        return enviarFotos(id, prontas, atual);
-      }).then(function(){
-        dmsg(""); return reload();
-      }).then(function(){ paint(); })
+        return comLogin(function(){
+          return subirFotos(prontas, function(i,n){ dmsg("enviando foto " + i + " de " + n + "…"); })
+            .then(function(fotos){
+              dmsg("guardando…");
+              return mudarIndex(function(ix){
+                ix.entries.forEach(function(e){
+                  if(e.id === id) e.photos = (e.photos||[]).concat(fotos);
+                });
+              });
+            });
+        });
+      }).then(function(){ dmsg(""); paint(); })
         .catch(function(err){ falhou(err, dmsg); });
     };
     $("d-edit").onclick = function(){
@@ -1277,8 +1412,19 @@ function openDetail(id){
         return;
       }
       b.disabled = true; b.textContent = "Apagando…";
-      api("/api/entries/"+id, { method:"DELETE" })
-        .then(function(){ selected = null; closeSheet(); return reload(); })
+      var fotos = ((entryById(id)||en).photos || []).slice();
+      comLogin(function(){
+        return mudarIndex(function(ix){
+          ix.entries = ix.entries.filter(function(e){ return e.id !== id; });
+        }).then(function(){
+          var chain = Promise.resolve();
+          fotos.forEach(function(p){
+            chain = chain.then(function(){ return apagarArquivo(p.fileId); })
+                         .then(function(){ return apagarArquivo(p.thumbId); });
+          });
+          return chain;
+        });
+      }).then(function(){ selected = null; closeSheet(); renderList(); renderMap(); })
         .catch(function(err){ b.disabled = false; b.textContent = "Apagar"; falhou(err, dmsg); });
     };
   }
@@ -1303,46 +1449,83 @@ function openRouteEdit(en){
   function msg(s){ var m = $("f-msg"); if(!m) return; m.textContent = s||""; m.hidden = !s; }
   $("f-save").onclick = function(){
     var btn = $("f-save"); btn.disabled = true; btn.textContent = "Guardando…";
-    resolveFolder().then(function(fid){
-      return apiJSON("/api/entries/"+en.id, "PUT", {
-        title: $("f-title").value.trim() || "Trajeto sem nome",
-        date: $("f-date").value || en.date,
-        note: $("f-note").value.trim(),
-        folderId: fid
+    var escolha = escolhaDePasta();
+    var novo = {
+      title: $("f-title").value.trim() || "Trajeto sem nome",
+      date: $("f-date").value || en.date,
+      note: $("f-note").value.trim(),
+      folderId: escolha.id === "inbox" ? null : escolha.id
+    };
+    comLogin(function(){
+      return mudarIndex(function(ix){
+        if(escolha.novo && !ix.folders.some(function(f){ return f.id === escolha.novo.id; })) ix.folders.push(escolha.novo);
+        ix.entries.forEach(function(e){
+          if(e.id === en.id){ e.title = novo.title; e.date = novo.date; e.note = novo.note; e.folderId = novo.folderId; }
+        });
       });
-    }).then(function(){ closeSheet(); return reload(); })
+    }).then(function(){ closeSheet(); renderList(); renderMap(); })
       .catch(function(err){ btn.disabled = false; btn.textContent = "Guardar"; falhou(err, msg); });
   };
 }
 
-/* ===================== acontecimentos e conta ===================== */
+/* ===================== conta e acontecimentos ===================== */
 $("menubtn").onclick = function(){ openMenu(); };
 $("authbtn").onclick = function(){ openConta(); };
 
 function openConta(){
   var corpo;
-  if(!CONFIG.GOOGLE_CLIENT_ID){
-    corpo = '<div class="note" style="margin-top:0">O login ainda não foi configurado. Preencha o GOOGLE_CLIENT_ID no começo do script deste arquivo.</div>';
-  } else if(auth.podeGravar){
-    corpo = '<div class="note" style="margin-top:0">Você entrou como <strong>'+esc(auth.email)+'</strong> e pode adicionar, editar e apagar.</div>' +
+  if(!CONFIG.CLIENT_ID){
+    corpo = '<div class="note" style="margin-top:0">O login ainda não foi configurado. Falta o CLIENT_ID no começo deste arquivo.</div>';
+  } else if(podeGravar && !CONFIG.FOLDER_ID){
+    corpo = '<div class="note" style="margin-top:0">Você entrou. Falta criar a pasta onde as memórias vão morar — é uma vez só.</div>' +
       '<div class="row" style="margin-top:16px"><div style="flex:0 0 auto">' +
-      '<button class="btn" type="button" id="c-sair">Sair desta conta</button></div></div>';
+      '<button class="btn primary" type="button" id="c-pasta">Criar a pasta do site</button></div></div>' +
+      '<div class="msg" id="c-msg" hidden></div>';
+  } else if(podeGravar){
+    corpo = '<div class="note" style="margin-top:0">Você entrou na conta do site e pode adicionar, editar e apagar. ' +
+      'Quem só abrir o endereço continua vendo tudo, sem precisar entrar.</div>' +
+      '<div class="row" style="margin-top:16px"><div style="flex:0 0 auto">' +
+      '<button class="btn" type="button" id="c-sair">Sair</button></div></div>';
   } else {
-    corpo = '<div class="note" style="margin-top:0">Qualquer pessoa pode abrir este site e ver tudo. Para adicionar ou apagar, entre com um dos dois e-mails de vocês.</div>' +
-      '<div id="conta-botao" style="margin-top:16px;display:flex;justify-content:center"></div>';
+    corpo = '<div class="note" style="margin-top:0">Qualquer pessoa abre este site e vê tudo. Para adicionar ou apagar, ' +
+      'entre com a conta do site — aquela que vocês dois usam.</div>' +
+      '<div class="row" style="margin-top:16px"><div style="flex:0 0 auto">' +
+      '<button class="btn primary" type="button" id="c-entrar">Entrar com o Google</button></div></div>';
   }
   sheet("Nossa conta", '<div id="conta-area">'+corpo+'</div>',
     '<span class="spacer"></span><button class="btn primary" type="button" id="c-ok">Fechar</button>');
   $("c-ok").onclick = closeSheet;
-  var sair = $("c-sair"); if(sair) sair.onclick = sairDaConta;
-  var alvo = $("conta-botao");
-  if(alvo && window.google && google.accounts && google.accounts.id){
-    try {
-      google.accounts.id.renderButton(alvo, { theme: isDark() ? "filled_black" : "outline", size: "large", shape: "pill", text: "signin_with", locale: "pt-BR" });
-    } catch(e){
-      alvo.innerHTML = '<div class="meta">O botão do Google não carregou. Verifique a conexão e recarregue.</div>';
-    }
-  }
+  var e1 = $("c-entrar"); if(e1) e1.onclick = entrar;
+  var e2 = $("c-sair");   if(e2) e2.onclick = sair;
+  var e3 = $("c-pasta");  if(e3) e3.onclick = criarPastaDoSite;
+}
+
+function criarPastaDoSite(){
+  var m = $("c-msg");
+  function msg(s){ if(m){ m.textContent = s||""; m.hidden = !s; } }
+  msg("criando…");
+  comLogin(function(){
+    return gJSON(DRIVE + "/files?fields=id", {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ name:"Le&Beni — memórias", mimeType:"application/vnd.google-apps.folder" })
+    });
+  }).then(function(j){
+    return tornarPublico(j.id).then(function(){ return j.id; });
+  }).then(function(id){
+    sheet("Pasta criada",
+      '<div class="note" style="margin-top:0">Pronto. Agora copie o código abaixo e cole no arquivo do site, ' +
+      'na linha <strong>FOLDER_ID</strong>, lá no começo. É a última coisa que você preenche à mão.</div>' +
+      '<div class="in" style="margin-top:14px;font-family:var(--mono);word-break:break-all;user-select:all">'+esc(id)+'</div>' +
+      '<div class="meta">Depois de colar, salve o arquivo, suba de novo pra hospedagem e recarregue o site.</div>',
+      '<span class="spacer"></span><button class="btn primary" type="button" id="p-copiar">Copiar o código</button>');
+    $("p-copiar").onclick = function(){
+      var btn = $("p-copiar");
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(id).then(function(){ btn.textContent = "Copiado"; })
+          .catch(function(){ btn.textContent = "Selecione e copie à mão"; });
+      } else btn.textContent = "Selecione e copie à mão";
+    };
+  }).catch(function(err){ falhou(err, msg); });
 }
 
 function openMenu(){
@@ -1350,8 +1533,8 @@ function openMenu(){
     if(a.id==="inbox") return 1; if(b.id==="inbox") return -1;
     return (b.createdAt||0)-(a.createdAt||0);
   }).map(function(f){
-    var n = entries.filter(function(e){ return (folderOf(e.folderId)?e.folderId:"inbox") === f.id; }).length;
-    var bloqueado = (f.id === "inbox") || !auth.podeGravar;
+    var n = entries.filter(function(e){ return e.folderId === f.id; }).length;
+    var bloqueado = (f.id === "inbox") || !podeGravar;
     return '<div class="folderrow">' +
       '<input class="in" data-fid="'+esc(f.id)+'" value="'+esc(f.name)+'"'+(bloqueado?" disabled":"")+'>' +
       '<span class="pill">'+n+'</span>' +
@@ -1361,13 +1544,13 @@ function openMenu(){
   }).join("");
 
   var body = '<label class="lb">Nossos acontecimentos</label><div id="m-folders">'+rows+'</div>' +
-    (auth.podeGravar
+    (podeGravar
       ? '<div class="row" style="margin-top:12px"><div>' +
         '<input class="in" id="m-new" type="text" placeholder="Um novo acontecimento"></div>' +
         '<div style="flex:0 0 auto"><button class="btn" type="button" id="m-add">Criar</button></div></div>'
-      : '<div class="meta">Entre com a conta de vocês para criar ou renomear acontecimentos.</div>') +
+      : '<div class="meta">Entre na conta do site para criar ou renomear acontecimentos.</div>') +
     '<div class="meta" style="margin-top:18px"><b>Onde isso tudo fica</b><br>' +
-      'Os registros e as fotos ficam guardados na nuvem de vocês. Qualquer pessoa que abrir este endereço vê tudo, de qualquer aparelho, sem precisar de nada.</div>' +
+      'No Google Drive da conta do site. Quem abrir este endereço vê tudo, de qualquer aparelho, sem precisar de nada.</div>' +
     '<div class="msg" id="m-msg" hidden></div>';
 
   sheet("Acontecimentos", body, '<span class="spacer"></span><button class="btn primary" type="button" id="m-ok">Fechar</button>');
@@ -1376,12 +1559,14 @@ function openMenu(){
 
   Array.prototype.forEach.call(scrim.querySelectorAll("[data-fid]"), function(inp){
     inp.onchange = function(){
-      var f = folderOf(inp.getAttribute("data-fid"));
-      if(!f) return;
-      var novo = inp.value.trim() || f.name;
-      apiJSON("/api/folders/"+f.id, "PUT", { name:novo })
-        .then(function(){ f.name = novo; renderList(); })
-        .catch(function(err){ falhou(err, mmsg); });
+      var fid = inp.getAttribute("data-fid");
+      var novo = inp.value.trim();
+      if(!novo) return;
+      comLogin(function(){
+        return mudarIndex(function(ix){
+          ix.folders.forEach(function(f){ if(f.id === fid) f.name = novo; });
+        });
+      }).then(function(){ renderList(); }).catch(function(err){ falhou(err, mmsg); });
     };
   });
   Array.prototype.forEach.call(scrim.querySelectorAll("[data-fdel]"), function(b){
@@ -1392,20 +1577,23 @@ function openMenu(){
         setTimeout(function(){ if(b.isConnected) openMenu(); }, 4000);
         return;
       }
-      api("/api/folders/"+fid, { method:"DELETE" })
-        .then(function(){ return reload(); })
-        .then(function(){ openMenu(); })
-        .catch(function(err){ falhou(err, mmsg); });
+      comLogin(function(){
+        return mudarIndex(function(ix){
+          ix.folders = ix.folders.filter(function(f){ return f.id !== fid; });
+          ix.entries.forEach(function(e){ if(e.folderId === fid) e.folderId = null; });
+        });
+      }).then(function(){ openMenu(); }).catch(function(err){ falhou(err, mmsg); });
     };
   });
   var add = $("m-add");
   if(add) add.onclick = function(){
     var name = $("m-new").value.trim();
     if(!name){ mmsg("Dá um nome a esse acontecimento."); return; }
-    apiJSON("/api/folders", "POST", { name:name })
-      .then(function(){ return reload(); })
-      .then(function(){ openMenu(); })
-      .catch(function(err){ falhou(err, mmsg); });
+    comLogin(function(){
+      return mudarIndex(function(ix){
+        ix.folders.push({ id: uid(), name: name, createdAt: Date.now() });
+      });
+    }).then(function(){ openMenu(); }).catch(function(err){ falhou(err, mmsg); });
   };
 }
 
@@ -1414,7 +1602,7 @@ function applyTheme(t){
   if(t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
   else document.documentElement.removeAttribute("data-theme");
   try { localStorage.setItem("lb-tema", t || "auto"); } catch(e){}
-  setTiles(); renderMap();
+  renderMap();
 }
 (function(){
   var t = "auto";
@@ -1428,7 +1616,7 @@ $("themebtn").onclick = function(){
 if(window.matchMedia){
   var mqd = window.matchMedia("(prefers-color-scheme: dark)");
   if(mqd.addEventListener) mqd.addEventListener("change", function(){
-    if(!document.documentElement.getAttribute("data-theme")){ setTiles(); renderMap(); }
+    if(!document.documentElement.getAttribute("data-theme")) renderMap();
   });
 }
 
@@ -1443,9 +1631,10 @@ window.addEventListener("beforeunload", function(e){
 
 /* ===================== início ===================== */
 (function espera(n){
-  if(window.google && google.accounts && google.accounts.id){ initAuth(); return; }
+  if(window.google && google.accounts && google.accounts.oauth2){ initAuth(); return; }
   if(n > 0) setTimeout(function(){ espera(n-1); }, 300);
 })(25);
+
 initMap();
 applyAuth();
 reload().then(function(){
@@ -1460,7 +1649,7 @@ reload().then(function(){
   }
   var r = null;
   try { r = JSON.parse(localStorage.getItem("lb-rascunho") || "null"); } catch(e){}
-  if(r && r.points && r.points.length > 1 && auth.podeGravar){
+  if(r && r.points && r.points.length > 1 && podeGravar){
     var fim = r.points[r.points.length-1][2] || Date.now();
     openRouteForm({ points:r.points, startedAt:r.startedAt, endedAt:fim,
                     durationMs: fim - r.startedAt, distanceKm: r.distanceKm||0 });
