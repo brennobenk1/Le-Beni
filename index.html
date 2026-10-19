@@ -36,6 +36,7 @@
   --route:#7FCB9B; --warn:#D8A961;
   --shadow:0 1px 2px rgba(0,0,0,.35), 0 10px 26px rgba(0,0,0,.44);
   --shadow-lift:0 2px 5px rgba(0,0,0,.4), 0 16px 38px rgba(0,0,0,.5);
+  --tile-filter:invert(.94) hue-rotate(180deg) brightness(.94) contrast(.88) saturate(.6);
   color-scheme:dark;
 }}
 :root[data-theme="dark"]{
@@ -47,6 +48,7 @@
   --route:#7FCB9B; --warn:#D8A961;
   --shadow:0 1px 2px rgba(0,0,0,.35), 0 10px 26px rgba(0,0,0,.44);
   --shadow-lift:0 2px 5px rgba(0,0,0,.4), 0 16px 38px rgba(0,0,0,.5);
+  --tile-filter:invert(.94) hue-rotate(180deg) brightness(.94) contrast(.88) saturate(.6);
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -450,8 +452,7 @@ function entryById(id){ for(var i=0;i<entries.length;i++) if(entries[i].id===id)
 
 /* ===================== mapa ===================== */
 var map, markers = {}, lines = {}, endpoints = {};
-var LIGHT = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
-var DARK  = "https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png";
+var TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 var tileLayer = null;
 
 function isDark(){
@@ -461,11 +462,10 @@ function isDark(){
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 function setTiles(){
-  if(!map) return;
-  if(tileLayer) map.removeLayer(tileLayer);
-  tileLayer = L.tileLayer(isDark() ? DARK : LIGHT, {
-    maxZoom: 20, subdomains:"abcd",
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  if(!map || tileLayer) return;
+  tileLayer = L.tileLayer(TILES, {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   }).addTo(map);
   tileLayer.setZIndex(1);
 }
