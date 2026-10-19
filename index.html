@@ -296,6 +296,9 @@ textarea.in{resize:vertical;min-height:74px;line-height:1.55}
 .msg{font-size:.82rem;color:var(--petal);margin-top:11px;line-height:1.5}
 .folderrow{display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft)}
 .folderrow input{flex:1;min-width:0}
+.confete{position:fixed;inset:0;z-index:1090;pointer-events:none}
+.icon.festa.on{background:var(--petal-soft);border-color:var(--petal)}
+.icon.festa.on svg{stroke:var(--petal)}
 #lightbox{position:fixed;inset:0;z-index:1100;background:rgba(11,18,13,.94);display:grid;place-items:center;padding:20px}
 #lightbox img{max-width:100%;max-height:100%;border-radius:4px;border:6px solid var(--paper);box-shadow:var(--shadow-lift)}
 #lbclose{position:absolute;top:max(14px,env(safe-area-inset-top,0px));right:max(14px,env(safe-area-inset-right,0px));
@@ -1522,6 +1525,75 @@ function openRouteForm(done){
   };
 }
 
+/* ===================== confete de aniversário ===================== */
+/* uma pasta é festa se você marcou, ou se o nome dela entrega */
+function ehFesta(fid){
+  var f = folderOf(fid);
+  if(!f) return false;
+  if(f.festa === true) return true;
+  if(f.festa === false) return false;
+  return /anivers|niver|festa|parab/i.test(f.name || "");
+}
+function confete(){
+  if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  var tela = document.createElement("canvas");
+  tela.className = "confete";
+  document.body.appendChild(tela);
+  var w = window.innerWidth, h = window.innerHeight;
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  tela.width = Math.round(w*dpr); tela.height = Math.round(h*dpr);
+  tela.style.width = w + "px"; tela.style.height = h + "px";
+  var cx = tela.getContext("2d");
+  cx.scale(dpr, dpr);
+
+  var folha = scrim.querySelector(".sheet");
+  var r = folha ? folha.getBoundingClientRect() : { left:0, top:h*0.35, width:w, height:h*0.3 };
+  var ox = r.left + r.width/2, oy = r.top + Math.min(100, r.height*0.28);
+
+  var cores = ["#F3B3C4","#B9607A","#3F7A58","#7FCB9B","#E8C66A","#FFF6E0","#D98BA6","#8FD3F4"];
+  var ps = [], n = 150;
+  for(var i=0;i<n;i++){
+    var ang = Math.PI*2*(i/n) + Math.random()*0.5;
+    var vel = 4 + Math.random()*10;
+    ps.push({
+      x: ox, y: oy,
+      vx: Math.cos(ang)*vel*(0.7+Math.random()*0.9),
+      vy: Math.sin(ang)*vel - 5 - Math.random()*5,
+      lw: 5 + Math.random()*7, lh: 7 + Math.random()*10,
+      cor: cores[(Math.random()*cores.length)|0],
+      rot: Math.random()*Math.PI, vr: (Math.random()-0.5)*0.45,
+      vida: 0, max: 100 + Math.random()*70,
+      redondo: Math.random() < 0.28
+    });
+  }
+  var inicio = performance.now();
+  (function quadro(){
+    cx.clearRect(0,0,w,h);
+    var vivos = 0;
+    for(var i=0;i<ps.length;i++){
+      var p = ps[i];
+      if(p.vida > p.max) continue;
+      vivos++;
+      p.vida++;
+      p.vy += 0.3; p.vx *= 0.99; p.vy *= 0.995;
+      p.x += p.vx; p.y += p.vy;
+      p.rot += p.vr;
+      var fim = p.max * 0.6;
+      var a = p.vida > fim ? 1 - (p.vida - fim)/(p.max - fim) : 1;
+      cx.save();
+      cx.globalAlpha = Math.max(0, a);
+      cx.translate(p.x, p.y);
+      cx.rotate(p.rot);
+      cx.fillStyle = p.cor;
+      if(p.redondo){ cx.beginPath(); cx.arc(0, 0, p.lw/2, 0, 6.2832); cx.fill(); }
+      else cx.fillRect(-p.lw/2, -p.lh/2, p.lw, p.lh * (0.45 + 0.55*Math.abs(Math.cos(p.rot))));
+      cx.restore();
+    }
+    if(vivos && performance.now() - inicio < 6000) requestAnimationFrame(quadro);
+    else if(tela.parentNode) tela.parentNode.removeChild(tela);
+  })();
+}
+
 /* ===================== detalhe ===================== */
 function openDetail(id){
   var en = entryById(id); if(!en) return;
@@ -1554,6 +1626,7 @@ function openDetail(id){
 
   sheet(esc(en.title) + '<span class="sub">' + esc(fmtDate(en.date)) + ' · ' + esc(f ? f.name : "Momentos soltos") + '</span>', body, actions);
   var ok = $("d-ok"); if(ok) ok.onclick = closeSheet;
+  if(ehFesta(en.folderId)) setTimeout(confete, 160);
 
   function state(s){ var e = $("d-state"); if(!e) return; e.textContent = s||""; e.hidden = !s; }
   function dmsg(s){ var m = $("d-msg"); if(!m) return; m.textContent = s||""; m.hidden = !s; }
@@ -1795,6 +1868,9 @@ function openMenu(){
     return '<div class="folderrow">' +
       '<input class="in" data-fid="'+esc(f.id)+'" value="'+esc(f.name)+'"'+(bloqueado?" disabled":"")+'>' +
       '<span class="pill">'+n+'</span>' +
+      (bloqueado ? '' : '<button class="icon festa'+(ehFesta(f.id)?" on":"")+'" type="button" data-festa="'+esc(f.id)+'" ' +
+        'title="Soltar confete ao abrir" aria-label="Soltar confete ao abrir">' +
+        '<svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"></path></svg></button>') +
       (bloqueado ? '' : '<button class="icon" type="button" data-fdel="'+esc(f.id)+'" aria-label="Apagar acontecimento">' +
         '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>') +
       '</div>';
@@ -1806,6 +1882,8 @@ function openMenu(){
         '<input class="in" id="m-new" type="text" placeholder="Um novo acontecimento"></div>' +
         '<div style="flex:0 0 auto"><button class="btn" type="button" id="m-add">Criar</button></div></div>'
       : '<div class="meta">Entre na conta do site para criar ou renomear acontecimentos.</div>') +
+    '<div class="meta" style="margin-top:12px">O solzinho ao lado de cada acontecimento solta confete toda vez que um registro dele é aberto. ' +
+      'Pastas com “aniversário” no nome já vêm com ele ligado.</div>' +
     '<div class="meta" style="margin-top:18px"><b>Onde isso tudo fica</b><br>' +
       'No Google Drive da conta do site. Quem abrir este endereço vê tudo, de qualquer aparelho, sem precisar de nada.</div>' +
     '<div class="msg" id="m-msg" hidden></div>';
@@ -1827,6 +1905,21 @@ function openMenu(){
           });
         });
       }).then(function(){ renderList(); }).catch(function(err){ falhou(err, mmsg); });
+    };
+  });
+  Array.prototype.forEach.call(scrim.querySelectorAll("[data-festa]"), function(b){
+    b.onclick = function(){
+      var fid = b.getAttribute("data-festa");
+      var novo = !ehFesta(fid);
+      b.disabled = true;
+      comLogin(function(){
+        return mudarIndex(function(ix){
+          ix.folders.forEach(function(f){ if(f.id === fid) f.festa = novo; });
+        });
+      }).then(function(){
+        if(novo) confete();
+        openMenu();
+      }).catch(function(err){ b.disabled = false; falhou(err, mmsg); });
     };
   });
   Array.prototype.forEach.call(scrim.querySelectorAll("[data-fdel]"), function(b){
